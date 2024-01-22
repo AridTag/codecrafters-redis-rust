@@ -1,33 +1,30 @@
-use std::net::{TcpListener, TcpStream};
-use std::io::prelude::*;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
-fn main() {
-    let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
+#[tokio::main]
+async fn main() -> tokio::io::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                println!("accepted new connection");
-                let mut stream = stream;
-                handle_connection(&mut stream);
-            }
-            Err(e) => {
-                println!("error: {}", e);
-            }
-        }
+    loop {
+        let (stream, addr) = listener.accept().await?;
+        println!("Accepted connection from {}", addr);
+
+        tokio::spawn(async move {
+            handle_connection(stream).await;
+        });
     }
 }
 
-fn handle_connection(stream: &mut TcpStream) {
+async fn handle_connection(mut stream: TcpStream) {
     let mut buffer = [0;512];
     loop {
-        match stream.read(&mut buffer) {
-            Ok(size) => {
+        match stream.read(&mut buffer).await {
+            Ok(_size) => {
                 let response = "+PONG\r\n";
-                stream.write(response.as_bytes()).unwrap();
-                stream.flush().unwrap();
+                let _wrote_bytes = stream.write(response.as_bytes()).await.unwrap();
+                stream.flush().await.unwrap();
             }
-            Err(e) => {
+            Err(_e) => {
                 // client disconnected?
                 break;
             }
