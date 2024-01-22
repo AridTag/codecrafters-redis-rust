@@ -19,7 +19,18 @@ fn main() {
 }
 
 fn handle_connection(stream: &mut TcpStream) {
-    let response = "+PONG\r\n";
-    stream.write(response.as_bytes()).unwrap();
-    stream.flush().unwrap();
+    let mut buffer = [0;512];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(size) => {
+                let response = "+PONG\r\n";
+                stream.write(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+            Err(e) => {
+                // client disconnected?
+                break;
+            }
+        }
+    }
 }
