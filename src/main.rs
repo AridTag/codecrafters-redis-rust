@@ -1,8 +1,17 @@
+use std::collections::HashMap;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use bytes::BufMut;
 use std::io::Write;
+use std::sync::Arc;
+use bytes::buf::Writer;
+use tokio::sync::RwLock;
+use once_cell::sync::Lazy;
+
+static CACHE: Lazy<Arc<RwLock<HashMap<String, String>>>> = Lazy::new(|| {
+    Arc::new(RwLock::new(HashMap::new()))
+});
 
 #[tokio::main]
 async fn main() -> tokio::io::Result<()> {
@@ -14,7 +23,7 @@ async fn main() -> tokio::io::Result<()> {
 
         tokio::spawn(async move {
             match handle_connection(stream).await {
-                Ok(_) => { }
+                Ok(_) => {}
                 Err(e) => println!("{:?}", e)
             };
         });
@@ -96,10 +105,6 @@ impl RedisClientConnection {
 
 
     fn parse_resp(buffer: &[u8]) -> Result<Option<RespParseResult>, RespProtocolError> {
-        {
-            let debug_str = String::from_utf8_lossy(buffer);
-            println!("Parsing {}", debug_str);
-        }
         let part_end = Self::get_next_part_end(buffer);
         if part_end.is_none() {
             return Ok(None);
@@ -127,7 +132,7 @@ impl RedisClientConnection {
         Ok(Some(
             RespParseResult {
                 request,
-                consumed
+                consumed,
             }
         ))
     }
@@ -202,9 +207,6 @@ struct RespParseResult {
     consumed: usize,
 }
 
-// *2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n
-// *<number-of-elements>\r\n<element-1>...<element-n>
-
 async fn handle_connection(stream: TcpStream) -> Result<(), anyhow::Error> {
     let mut client = RedisClientConnection::new(stream);
     loop {
@@ -224,28 +226,66 @@ async fn handle_connection(stream: TcpStream) -> Result<(), anyhow::Error> {
     }
 }
 
+fn write_bulk_string(buffer: &mut Writer<Vec<u8>>, string: &[u8]) -> tokio::io::Result<usize> {
+    let length_str = string.len().to_string();
+    buffer.write(format!("${}\r\n{}\r\n", length_str, String::from_utf8_lossy(string)).as_bytes())
+}
+
 async fn handle_command(client: &mut RedisClientConnection, command: String, arguments: &[RespType]) -> Result<(), anyhow::Error> {
+    let mut response_buff = vec![].writer();
     match command.as_str() {
         "ECHO" | "echo" => {
             if let RespType::BulkString(string) = &arguments[0] {
-                let len_str = string.len().to_string();
-                let mut buff = vec![].writer();
-                buff.write(format!("${}\r\n{}\r\n", len_str, String::from_utf8_lossy(string)).as_bytes())?;
-
-                client.stream.write(buff.get_ref()).await?;
-                client.stream.flush().await?;
+                write_bulk_string(&mut response_buff, string)?;
             }
         }
 
         "PING" | "ping" => {
-            let mut buff = vec![].writer();
-            buff.write(b"+PONG\r\n")?;
-            client.stream.write(buff.get_ref()).await?;
-            client.stream.flush().await?;
+            response_buff.write(b"+PONG\r\n")?;
+        }
+
+        "SET" | "set" => {
+            let mut success = false;
+            if arguments.len() == 2 {
+                if let RespType::BulkString(key) = &arguments[0] {
+                    if let RespType::BulkString(value) = &arguments[1] {
+                        let key = String::from_utf8_lossy(key).to_string();
+                        let value = String::from_utf8_lossy(value).to_string();
+                        let mut cache = CACHE.write().await;
+                        cache.insert(key, value);
+                        response_buff.write(b"+OK\r\n")?;
+                        success = true;
+                    }
+                }
+            }
+
+            if !success {
+                response_buff.write(b"-Failed to set\r\n")?;
+            }
+        }
+
+        "GET" | "get" => {
+            let mut success = false;
+            if let RespType::BulkString(key) = &arguments[0] {
+                let key = String::from_utf8_lossy(key).to_string();
+                let cache = CACHE.read().await;
+                if let Some(entry) = cache.get(&key) {
+                    write_bulk_string(&mut response_buff, entry.as_bytes())?;
+                    success = true;
+                }
+            }
+
+            if !success {
+                response_buff.write(b"$0\r\n\r\n")?; // Nil response
+                //response_buff.write(b"_\r\n")?; // RESP3 Nil response
+            }
         }
 
         _ => todo!("Gotta implement")
     }
+
+    client.stream.write(response_buff.get_ref()).await?;
+    client.stream.flush().await?;
 
     Ok(())
 }
