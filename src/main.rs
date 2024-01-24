@@ -5,11 +5,18 @@ use tokio::net::{TcpListener, TcpStream};
 use bytes::BufMut;
 use std::io::Write;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use bytes::buf::Writer;
 use tokio::sync::RwLock;
 use once_cell::sync::Lazy;
 
-static CACHE: Lazy<Arc<RwLock<HashMap<String, String>>>> = Lazy::new(|| {
+struct CacheEntry {
+    creation_time: u128,
+    timeout: Option<Duration>,
+    value: String,
+}
+
+static CACHE: Lazy<Arc<RwLock<HashMap<String, CacheEntry>>>> = Lazy::new(|| {
     Arc::new(RwLock::new(HashMap::new()))
 });
 
@@ -246,13 +253,40 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
 
         "SET" | "set" => {
             let mut success = false;
-            if arguments.len() == 2 {
+            if arguments.len() >= 2 {
+                let mut timeout = None;
+                if arguments.len() >= 4 {
+                    if let RespType::BulkString(option) = &arguments[2] {
+                        if let RespType::BulkString(value) = &arguments[3] {
+                            let option = String::from_utf8_lossy(option).to_string();
+                            let value = String::from_utf8_lossy(value).to_string();
+                            match option.as_str() {
+                                "PX" | "px" => {
+                                    timeout = Some(Duration::from_millis(value.parse::<u64>()?));
+                                }
+
+                                "EX" | "ex" => {
+                                    timeout = Some(Duration::from_secs(value.parse::<u64>()?));
+                                }
+
+                                _ => { }
+                            }
+                        }
+                    }
+                }
+
                 if let RespType::BulkString(key) = &arguments[0] {
                     if let RespType::BulkString(value) = &arguments[1] {
                         let key = String::from_utf8_lossy(key).to_string();
                         let value = String::from_utf8_lossy(value).to_string();
                         let mut cache = CACHE.write().await;
-                        cache.insert(key, value);
+
+                        let entry = CacheEntry {
+                            creation_time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis(),
+                            value,
+                            timeout
+                        };
+                        cache.insert(key, entry);
                         response_buff.write(b"+OK\r\n")?;
                         success = true;
                     }
@@ -269,14 +303,26 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
             if let RespType::BulkString(key) = &arguments[0] {
                 let key = String::from_utf8_lossy(key).to_string();
                 let cache = CACHE.read().await;
+                let mut is_valid = true;
                 if let Some(entry) = cache.get(&key) {
-                    write_bulk_string(&mut response_buff, entry.as_bytes())?;
-                    success = true;
+                    let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+                    if let Some(timeout) = entry.timeout {
+                        if (current_time - entry.creation_time) >= timeout.as_millis() {
+                            is_valid = false;
+                        }
+                    }
+
+                    if is_valid {
+                        write_bulk_string(&mut response_buff, entry.value.as_bytes())?;
+                        success = true;
+                    }
                 }
+
+                // TODO: Should probably just remove the item from the cache when it's expired
             }
 
             if !success {
-                response_buff.write(b"$0\r\n\r\n")?; // Nil response
+                response_buff.write(b"$-1\r\n\r\n")?; // Nil response
                 //response_buff.write(b"_\r\n")?; // RESP3 Nil response
             }
         }
