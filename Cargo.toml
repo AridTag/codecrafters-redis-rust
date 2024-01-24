@@ -24,3 +24,5 @@ bytes = "1.3.0"                                     # helps manage buffers
 thiserror = "1.0.32"                                # error handling
 tokio = { version = "1.23.0", features = ["full"] } # async networking
 once_cell = "1.19"
+clap = { version = "4.4", features = ["derive"] }
+clap_derive = "4.4"

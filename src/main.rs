@@ -9,6 +9,21 @@ use std::time::{Duration, SystemTime};
 use bytes::buf::Writer;
 use tokio::sync::RwLock;
 use once_cell::sync::Lazy;
+use clap::{arg, Parser};
+
+struct Config {
+    dir: Option<String>,
+    db_filename: Option<String>,
+}
+
+impl Config {
+    const fn default() -> Self {
+        Self {
+            dir: None,
+            db_filename: None,
+        }
+    }
+}
 
 struct CacheEntry {
     creation_time: u128,
@@ -16,12 +31,36 @@ struct CacheEntry {
     value: String,
 }
 
+static CONFIG: Lazy<Arc<RwLock<Config>>> = Lazy::new(|| { Arc::new(RwLock::new(Config::default())) });
+
 static CACHE: Lazy<Arc<RwLock<HashMap<String, CacheEntry>>>> = Lazy::new(|| {
     Arc::new(RwLock::new(HashMap::new()))
 });
 
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(long)]
+    dir: Option<String>,
+
+    #[arg(long)]
+    dbfilename: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> tokio::io::Result<()> {
+    {
+        let args = Args::parse();
+
+        let mut config = CONFIG.write().await;
+        if let Some(dir) = args.dir {
+            config.dir = Some(dir);
+        }
+
+        if let Some(dbfilename) = args.dbfilename {
+            config.db_filename = Some(dbfilename);
+        }
+    }
+
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
 
     loop {
@@ -68,7 +107,7 @@ pub enum RespProtocolError {
 
 pub struct RedisClientConnection {
     stream: TcpStream,
-    buffer: [u8; 512],
+    read_buffer: [u8; 512],
     write_index: usize,
 }
 
@@ -76,7 +115,7 @@ impl RedisClientConnection {
     pub const fn new(stream: TcpStream) -> Self {
         Self {
             stream,
-            buffer: [0u8; 512],
+            read_buffer: [0u8; 512],
             write_index: 0,
         }
     }
@@ -88,21 +127,21 @@ impl RedisClientConnection {
         }
 
         loop {
-            if self.write_index >= self.buffer.len() {
+            if self.write_index >= self.read_buffer.len() {
                 return Err(RespProtocolError::MessageTooBig.into());
             }
 
-            let bytes_read = self.stream.read(&mut self.buffer[self.write_index..]).await?;
+            let bytes_read = self.stream.read(&mut self.read_buffer[self.write_index..]).await?;
             if bytes_read == 0 {
                 continue;
             }
 
             self.write_index += bytes_read;
             let end_index = self.write_index;
-            let request = Self::parse_resp(&self.buffer[0..end_index])?;
+            let request = Self::parse_resp(&self.read_buffer[0..end_index])?;
             if let Some(RespParseResult { request, consumed }) = request {
                 println!("Received request: {:?}", request);
-                slide_window(&mut self.buffer, consumed, self.write_index);
+                slide_window(&mut self.read_buffer, consumed, self.write_index);
                 self.write_index -= consumed;
 
                 return Ok(request);
@@ -233,13 +272,17 @@ async fn handle_connection(stream: TcpStream) -> Result<(), anyhow::Error> {
     }
 }
 
+fn write_nil_bulk_string(buffer: &mut Writer<Vec<u8>>) -> tokio::io::Result<usize> {
+    buffer.write(b"$-1\r\n\r\n")
+}
+
 fn write_bulk_string(buffer: &mut Writer<Vec<u8>>, string: &[u8]) -> tokio::io::Result<usize> {
     let length_str = string.len().to_string();
     buffer.write(format!("${}\r\n{}\r\n", length_str, String::from_utf8_lossy(string)).as_bytes())
 }
 
 async fn handle_command(client: &mut RedisClientConnection, command: String, arguments: &[RespType]) -> Result<(), anyhow::Error> {
-    let mut response_buff = vec![].writer();
+    let mut response_buff = Vec::with_capacity(256).writer();
     match command.as_str() {
         "ECHO" | "echo" => {
             if let RespType::BulkString(string) = &arguments[0] {
@@ -324,6 +367,61 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
             if !success {
                 response_buff.write(b"$-1\r\n\r\n")?; // Nil response
                 //response_buff.write(b"_\r\n")?; // RESP3 Nil response
+            }
+        }
+
+        "CONFIG" | "config" => {
+            if arguments.len() >= 1 {
+                if let RespType::BulkString(command) = &arguments[0] {
+                    let command = String::from_utf8_lossy(command).to_string();
+                    match command.as_str() {
+                        "GET" | "get" => {
+                            let mut responses: Vec<(&str, Option<String>)> = vec![];
+                            for i in 1..arguments.len() {
+                                if let RespType::BulkString(option) = &arguments[i] {
+                                    let option = String::from_utf8_lossy(option).to_string();
+                                    match option.as_str() {
+                                        "DIR" | "dir" => {
+                                            let value = CONFIG.read().await.dir.clone();
+                                            responses.push(("dir", value));
+                                        }
+
+                                        "DBFILENAME" | "dbfilename" => {
+                                            let value = CONFIG.read().await.dir.clone();
+                                            responses.push(("dbfilename", value));
+                                        }
+
+                                        _ => { }
+                                    }
+                                }
+                            }
+
+                            response_buff.write(format!("*{}\r\n", responses.len() * 2).as_bytes())?;
+                            for (key, value) in &responses {
+                                write_bulk_string(&mut response_buff, key.as_bytes())?;
+                                if let Some(value) = value {
+                                    write_bulk_string(&mut response_buff, value.as_bytes())?;
+                                } else {
+                                    write_nil_bulk_string(&mut response_buff)?;
+                                }
+                            }
+                        }
+
+                        "SET" | "set" => {
+
+                        }
+
+                        "REWRITE" | "rewrite" => {
+
+                        }
+
+                        "RESETSTAT" | "resetstat" => {
+
+                        }
+
+                        _ => { }
+                    }
+                }
             }
         }
 
