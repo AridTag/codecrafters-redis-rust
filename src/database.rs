@@ -54,7 +54,9 @@ pub async fn db_load(db_file: impl AsRef<Path>) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-pub async fn _db_save(_file_path: &Path) {}
+pub async fn _db_save(_file_path: &Path) {
+    todo!("Implement saving!")
+}
 
 pub async fn db_get(db_id: usize, key: &String) -> Result<Option<DataType>, anyhow::Error> {
     let (result, should_remove) = {
