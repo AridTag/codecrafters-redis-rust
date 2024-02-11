@@ -18,6 +18,7 @@ static CONFIG: Lazy<Arc<RwLock<Config>>> = Lazy::new(|| { Arc::new(RwLock::new(C
 struct Config {
     dir: Option<String>,
     db_filename: Option<String>,
+    port: u16,
 }
 
 impl Config {
@@ -25,6 +26,7 @@ impl Config {
         Self {
             dir: None,
             db_filename: None,
+            port: 6379,
         }
     }
 }
@@ -36,13 +38,17 @@ struct Args {
 
     #[arg(long)]
     dbfilename: Option<String>,
+
+    #[arg(long)]
+    port: Option<u16>,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     handle_arguments().await?;
     load_database().await?;
-    run_server().await?;
+    let port = CONFIG.read().await.port;
+    run_server(port).await?;
 
     Ok(())
 }
@@ -57,6 +63,10 @@ async fn handle_arguments() -> Result<(), anyhow::Error> {
 
     if let Some(db_filename) = args.dbfilename {
         config.db_filename = Some(db_filename);
+    }
+
+    if let Some(port) = args.port {
+        config.port = port;
     }
 
     Ok(())
@@ -75,8 +85,10 @@ async fn load_database() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-async fn run_server() -> tokio::io::Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
+async fn run_server(port: u16) -> tokio::io::Result<()> {
+    let bind_addr = format!("127.0.0.1:{}", port);
+    let listener = TcpListener::bind(bind_addr.clone()).await.unwrap();
+    println!("Listening on {}", bind_addr);
     loop {
         let (stream, addr) = listener.accept().await?;
         println!("Accepted connection from {}", addr);
