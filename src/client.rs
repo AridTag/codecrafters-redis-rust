@@ -33,9 +33,6 @@ impl Display for RespDataType {
 
 #[derive(Error, Debug)]
 pub enum RespProtocolError {
-    //#[error("Unknown error")]
-    //Unknown,
-
     #[error("Received too many bytes before reaching end of message")]
     MessageTooBig,
 
