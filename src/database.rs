@@ -108,7 +108,7 @@ pub async fn db_set(db_id: usize, key: String, value: String, timeout: Option<Du
 pub async fn db_list_keys(db_id: usize) -> Result<Vec<String>, anyhow::Error> {
     let cache = CACHE.read().await;
     if let Some(database) = cache.get(&db_id) {
-        Ok(database.keys().cloned().collect::<Vec<_>>().into())
+        Ok(database.keys().cloned().collect::<Vec<_>>())
     } else {
         Err(anyhow::Error::msg("Database doesn't exist"))
     }

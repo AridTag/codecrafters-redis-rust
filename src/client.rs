@@ -74,7 +74,6 @@ impl RedisClientConnection {
                     if !elements.is_empty() {
                         if let RespDataType::BulkString(command) = &elements[0] {
                             let command = String::from_utf8_lossy(command).to_string();
-                            println!("Received command: {}", command);
                             handle_command(self, command, &elements[1..]).await?;
                         }
                     }
@@ -149,10 +148,8 @@ impl RedisClientConnection {
 
     fn get_next_part_end(buffer: &[u8]) -> Option<usize> {
         for i in 0..buffer.len() {
-            if buffer[i] == b'\r' {
-                if i + 1 < buffer.len() && buffer[i + 1] == b'\n' {
-                    return Some(i + 1);
-                }
+            if buffer[i] == b'\r' && (i + 1) < buffer.len() && buffer[i + 1] == b'\n' {
+                return Some(i + 1);
             }
         }
 
@@ -172,8 +169,8 @@ impl RedisClientConnection {
         let length = length as usize;
         Ok(Some(
             RespParseResult {
-                request: RespDataType::BulkString((&remainder[..length]).iter().cloned().collect()),
-                consumed: length as usize,
+                request: RespDataType::BulkString(remainder[..length].to_vec()),
+                consumed: length,
             }
         ))
     }
@@ -318,32 +315,27 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
             if !arguments.is_empty() {
                 if let RespDataType::BulkString(key) = &arguments[0] {
                     let key = String::from_utf8_lossy(key).to_string();
-                    if let Ok(value) = db_get(client.selected_db, &key).await {
-                        if let Some(value) = value {
-                            if let DataType::String(value) = value {
-                                write_bulk_string(&mut response_buff, value.as_bytes())?;
-                                success = true;
-                            }
-                        }
+                    if let Ok(Some(DataType::String(value))) = db_get(client.selected_db, &key).await {
+                        write_bulk_string(&mut response_buff, value.as_bytes())?;
+                        success = true;
                     }
                 }
             }
 
             if !success {
-                response_buff.write_all(b"$-1\r\n\r\n")?; // Nil response
-                //response_buff.write_all(b"_\r\n")?; // RESP3 Nil response
+                response_buff.write_all(b"$-1\r\n\r\n")?; // Nil
             }
         }
 
         "CONFIG" | "config" => {
-            if arguments.len() >= 1 {
+            if !arguments.is_empty() {
                 if let RespDataType::BulkString(command) = &arguments[0] {
                     let command = String::from_utf8_lossy(command).to_string();
                     match command.as_str() {
                         "GET" | "get" => {
                             let mut responses: Vec<(&str, Option<String>)> = vec![];
-                            for i in 1..arguments.len() {
-                                if let RespDataType::BulkString(option) = &arguments[i] {
+                            for data_arg in &arguments[1..] {
+                                if let RespDataType::BulkString(option) = data_arg {
                                     let option = String::from_utf8_lossy(option).to_string();
                                     match option.as_str() {
                                         "DIR" | "dir" => {
@@ -397,7 +389,7 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
                         let keys = db_list_keys(client.selected_db).await?;
                         let mut resp_keys = Vec::new();
                         for key in keys.iter() {
-                            resp_keys.push(RespDataType::BulkString(key.as_bytes().iter().cloned().collect()))
+                            resp_keys.push(RespDataType::BulkString(key.as_bytes().to_vec()))
                         }
                         let resp = RespDataType::Array(resp_keys);
                         write_resp(&mut response_buff, &resp).await?;
@@ -434,7 +426,7 @@ fn write_resp<'a>(buffer: &'a mut Writer<Vec<u8>>, value: &'a RespDataType)
     })
 }
 
-fn write_array<'a>(buffer: &'a mut Writer<Vec<u8>>, elements: &'a Vec<RespDataType>)
+fn write_array<'a>(buffer: &'a mut Writer<Vec<u8>>, elements: &'a [RespDataType])
     -> BoxFuture<'a, Result<(), anyhow::Error>> {
     Box::pin(async move {
         buffer.write_all(format!("*{}\r\n", elements.len()).as_bytes())?;

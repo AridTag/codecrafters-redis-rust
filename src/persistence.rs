@@ -90,9 +90,9 @@ impl RdbReader {
                     metadata.insert(key, value);
                 }
                 0xFB => {
-                    let db_table_size = reader.read_length_encoded_int().await?;
-                    let expiry_table_size = reader.read_length_encoded_int().await?;
-                    println!("Table sizes: {} -- {}", db_table_size, expiry_table_size);
+                    let _db_table_size = reader.read_length_encoded_int().await?;
+                    let _expiry_table_size = reader.read_length_encoded_int().await?;
+                    // TODO: Use table sizes
                 }
                 0xFC | 0xFD => {
                     if current_database.is_none() {
@@ -102,7 +102,7 @@ impl RdbReader {
                     // TODO: Handle expiry
                     let _expire_timestamp = reader.read_expiry_timestamp().await?;
                     let (key, value) = reader.read_key_value(None).await?;
-                    let database = databases.entry(current_database.unwrap()).or_insert_with(|| HashMap::new());
+                    let database = databases.entry(current_database.unwrap()).or_default();
                     database.insert(key, value);
                 }
                 0xFE => {
@@ -120,12 +120,10 @@ impl RdbReader {
                     }
 
                     let (key, value) = reader.read_key_value(Some(opcode)).await?;
-                    let database = databases.entry(current_database.unwrap()).or_insert_with(|| HashMap::new());
+                    let database = databases.entry(current_database.unwrap()).or_default();
                     database.insert(key, value);
                 }
             }
-
-
         }
 
         // TODO: Discard expired keys
@@ -213,8 +211,7 @@ impl RdbBufReader for BufReader<File> {
             Ok(value.to_string())
         } else {
             let length = Self::interpret_length_encoding(self, encoding, length).await?;
-            let mut buff = Vec::new();
-            buff.resize(length, 0u8);
+            let mut buff = vec![0; length];
             self.read_exact(&mut buff).await?;
 
             Ok(String::from_utf8_lossy(&buff).to_string())
@@ -232,12 +229,10 @@ impl RdbBufReader for BufReader<File> {
     }
 
     async fn read_key_value(&mut self, known_type: Option<u8>) -> Result<(String, DataType), RdbReadError> {
-        let value_type = {
-            if known_type.is_some() {
-                known_type.unwrap()
-            } else {
-                self.read_u8().await?
-            }
+        let value_type = if let Some(known_type) = known_type {
+            known_type
+        } else {
+            self.read_u8().await?
         };
 
         let key = self.read_string_encoded().await?;
