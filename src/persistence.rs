@@ -6,6 +6,7 @@ use std::str::FromStr;
 use thiserror::Error;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
+use async_trait::async_trait;
 
 #[allow(unused)]
 #[derive(Debug, Clone)]
@@ -145,6 +146,7 @@ impl RdbReader {
     }
 }
 
+#[async_trait]
 trait RdbBufReader {
     async fn read_length_encoded_int(&mut self) -> Result<usize, RdbReadError>;
     async fn read_string_encoded(&mut self) -> Result<String, RdbReadError>;
@@ -188,6 +190,7 @@ trait RdbBufReader {
     }
 }
 
+#[async_trait]
 impl RdbBufReader for BufReader<File> {
     async fn read_length_encoded_int(&mut self) -> Result<usize, RdbReadError> {
         let (encoding, length) = Self::read_length_encoding(self).await?;
