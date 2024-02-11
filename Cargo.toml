@@ -28,3 +28,4 @@ clap = { version = "4.4", features = ["derive"] }
 clap_derive = "4.4"
 async-trait = "0.1"
 futures = "0.3.30"
+time = { version = "0.3.34", features = ["local-offset", "macros", "formatting"] }

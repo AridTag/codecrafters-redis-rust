@@ -1,6 +1,7 @@
 mod client;
 mod database;
 mod persistence;
+mod util;
 
 use std::path::Path;
 use tokio::net::TcpListener;

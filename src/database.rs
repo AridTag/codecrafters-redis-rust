@@ -17,8 +17,7 @@ static CACHE: Lazy<Arc<RwLock<HashMap<usize, Database>>>> = Lazy::new(|| {
 });
 
 struct CacheEntry {
-    creation_time: u128,
-    timeout: Option<Duration>,
+    expiration: Option<SystemTime>,
     value: DataType,
 }
 
@@ -35,14 +34,20 @@ pub async fn db_load(db_file: impl AsRef<Path>) -> Result<(), anyhow::Error> {
     };
 
     for (id, map) in data.databases {
+        let expirations = data.expirations.get(&id);
         let remapped = map
             .into_iter()
             .map(|(k, v)| {
+                let expiration = if let Some(expirations) = expirations {
+                    expirations.get(&k).cloned()
+                } else {
+                    None
+                };
+
                 (
                     k,
                     CacheEntry {
-                        creation_time: 0,
-                        timeout: None,
+                        expiration,
                         value: v,
                     }
                 )
@@ -64,9 +69,8 @@ pub async fn db_get(db_id: usize, key: &String) -> Result<Option<DataType>, anyh
         if let Some(database) = cache.get(&db_id) {
             let mut is_valid = true;
             if let Some(entry) = database.get(key) {
-                let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
-                if let Some(timeout) = entry.timeout {
-                    if (current_time - entry.creation_time) >= timeout.as_millis() {
+                if let Some(expiration) = entry.expiration.as_ref() {
+                    if *expiration < SystemTime::now() {
                         is_valid = false;
                     }
                 }
@@ -96,10 +100,10 @@ pub async fn db_get(db_id: usize, key: &String) -> Result<Option<DataType>, anyh
 pub async fn db_set(db_id: usize, key: String, value: String, timeout: Option<Duration>) -> Result<(), anyhow::Error> {
     let mut cache = CACHE.write().await;
     if let Some(database) = cache.get_mut(&db_id) {
+        let expiration = timeout.map(|timeout| SystemTime::now() + timeout);
         let entry = CacheEntry {
-            creation_time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis(),
             value: DataType::String(value),
-            timeout,
+            expiration,
         };
         database.insert(key, entry);
     }

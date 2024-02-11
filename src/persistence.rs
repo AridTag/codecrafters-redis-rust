@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::Path;
 use std::str::FromStr;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
@@ -28,6 +29,7 @@ pub struct RdbData {
     pub rdb_version: u16,
     pub metadata: HashMap<String, String>,
     pub databases: HashMap<usize, HashMap<String, DataType>>,
+    pub expirations: HashMap<usize, HashMap<String, SystemTime>>,
 }
 
 #[derive(Error, Debug)]
@@ -79,7 +81,9 @@ impl RdbReader {
 
         let mut metadata = HashMap::new();
         let mut databases: HashMap<usize, HashMap<String, DataType>> = HashMap::new();
+        let mut expirations: HashMap<usize, HashMap<String, SystemTime>> = HashMap::new();
         let mut current_database: Option<usize> = None;
+        let mut next_expiration: Option<SystemTime> = None;
         loop {
             let opcode = reader.read_u8().await?;
             match opcode {
@@ -99,11 +103,14 @@ impl RdbReader {
                         return Err(RdbReadError::AttemptReadKeyWithoutDatabaseSelected);
                     }
 
-                    // TODO: Handle expiry
-                    let _expire_timestamp = reader.read_expiry_timestamp().await?;
-                    let (key, value) = reader.read_key_value(None).await?;
-                    let database = databases.entry(current_database.unwrap()).or_default();
-                    database.insert(key, value);
+                    let expire_timestamp = reader.read_expiry_timestamp(opcode).await?;
+                    let expiration_time = match expire_timestamp {
+                        ExpiryTimestamp::Seconds(sec) => Duration::from_secs(sec as u64),
+                        ExpiryTimestamp::Milliseconds(ms) => Duration::from_millis(ms),
+                    };
+
+                    let expiration_time = SystemTime::UNIX_EPOCH + expiration_time;
+                    next_expiration = Some(expiration_time);
                 }
                 0xFE => {
                     let database = reader.read_u8().await?;
@@ -111,16 +118,28 @@ impl RdbReader {
                 }
                 0xFF => {
                     // End of rdb.
-                    let _crc64 = reader.read_u64().await?;
+                    if rdb_version >= 5 {
+                        let _crc64 = reader.read_u64().await?;
+                    }
                     break;
                 }
                 _ => {
-                    if current_database.is_none() {
+                    let Some(current_database) = current_database else {
                         return Err(RdbReadError::AttemptReadKeyWithoutDatabaseSelected);
-                    }
+                    };
 
                     let (key, value) = reader.read_key_value(Some(opcode)).await?;
-                    let database = databases.entry(current_database.unwrap()).or_default();
+
+                    if let Some(expiration) = next_expiration {
+                        expirations
+                            .entry(current_database)
+                            .or_default()
+                            .insert(key.clone(), expiration);
+
+                        next_expiration = None;
+                    }
+
+                    let database = databases.entry(current_database).or_default();
                     database.insert(key, value);
                 }
             }
@@ -132,6 +151,7 @@ impl RdbReader {
             rdb_version,
             metadata,
             databases,
+            expirations,
         })
     }
 
@@ -148,7 +168,7 @@ impl RdbReader {
 trait RdbBufReader {
     async fn read_length_encoded_int(&mut self) -> Result<usize, RdbReadError>;
     async fn read_string_encoded(&mut self) -> Result<String, RdbReadError>;
-    async fn read_expiry_timestamp(&mut self) -> Result<ExpiryTimestamp, RdbReadError>;
+    async fn read_expiry_timestamp(&mut self, opcode: u8) -> Result<ExpiryTimestamp, RdbReadError>;
     async fn read_key_value(&mut self, known_type: Option<u8>) -> Result<(String, DataType), RdbReadError>;
 
     async fn read_length_encoding(reader: &mut BufReader<File>) -> Result<(LengthEncoding, usize), RdbReadError> {
@@ -218,12 +238,11 @@ impl RdbBufReader for BufReader<File> {
         }
     }
 
-    async fn read_expiry_timestamp(&mut self) -> Result<ExpiryTimestamp, RdbReadError> {
-        let flag = self.read_u8().await?;
-        let value = match flag {
+    async fn read_expiry_timestamp(&mut self, opcode: u8) -> Result<ExpiryTimestamp, RdbReadError> {
+        let value = match opcode {
             0xFD => ExpiryTimestamp::Seconds(self.read_u32_le().await?),
             0xFC => ExpiryTimestamp::Milliseconds(self.read_u64_le().await?),
-            _ => return Err(RdbReadError::InvalidExpiryTimestampFlag(flag)),
+            _ => return Err(RdbReadError::InvalidExpiryTimestampFlag(opcode)),
         };
         Ok(value)
     }

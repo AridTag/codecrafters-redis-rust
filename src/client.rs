@@ -227,7 +227,7 @@ fn write_simple_error(buffer: &mut Writer<Vec<u8>>, string: &[u8]) -> tokio::io:
 }
 
 fn write_nil_bulk_string(buffer: &mut Writer<Vec<u8>>) -> tokio::io::Result<()> {
-    buffer.write_all(b"$-1\r\n\r\n")?;
+    buffer.write_all(b"$-1\r\n")?;
     Ok(())
 }
 
@@ -247,7 +247,7 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
         }
 
         "PING" | "ping" => {
-            response_buff.write_all(b"+PONG\r\n")?;
+            write_simple_string(&mut response_buff, b"PONG")?;
         }
 
         "COMMAND" | "command" => {
@@ -320,7 +320,7 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
             }
 
             if !success {
-                response_buff.write_all(b"$-1\r\n\r\n")?; // Nil
+                write_nil_bulk_string(&mut response_buff)?;
             }
         }
 
