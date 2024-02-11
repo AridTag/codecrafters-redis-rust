@@ -3,6 +3,7 @@ use std::time::Duration;
 use std::io::Write;
 use bytes::buf::Writer;
 use bytes::BufMut;
+use futures::future::BoxFuture;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -414,29 +415,32 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
     Ok(())
 }
 
-async fn write_resp(buffer: &mut Writer<Vec<u8>>, value: &RespDataType) -> Result<(), anyhow::Error> {
-    match value {
-        RespDataType::Array(elements) => {
-            let fut = Box::pin(write_array(buffer, elements));
-            fut.await?;
+fn write_resp<'a>(buffer: &'a mut Writer<Vec<u8>>, value: &'a RespDataType)
+    -> BoxFuture<'a, Result<(), anyhow::Error>> {
+    Box::pin(async move {
+        match value {
+            RespDataType::Array(elements) => {
+                write_array(buffer, elements).await?;
+            }
+
+            RespDataType::BulkString(s) => {
+                write_bulk_string(buffer, s)?;
+            }
+
+            //_ => todo!("Need to implement writing {}", value)
         }
 
-        RespDataType::BulkString(s) => {
-            write_bulk_string(buffer, s)?;
-        }
-
-        //_ => todo!("Need to implement writing {}", value)
-    }
-
-    Ok(())
+        Ok(())
+    })
 }
 
-async fn write_array(buffer: &mut Writer<Vec<u8>>, elements: &Vec<RespDataType>) -> Result<(), anyhow::Error> {
-    buffer.write_all(format!("*{}\r\n", elements.len()).as_bytes())?;
-    for e in elements.iter() {
-        let mut fut = Box::pin(write_resp(buffer, e));
-        fut.as_mut().await?;
-    }
-
-    Ok(())
+fn write_array<'a>(buffer: &'a mut Writer<Vec<u8>>, elements: &'a Vec<RespDataType>)
+    -> BoxFuture<'a, Result<(), anyhow::Error>> {
+    Box::pin(async move {
+        buffer.write_all(format!("*{}\r\n", elements.len()).as_bytes())?;
+        for e in elements.iter() {
+            write_resp(buffer, e).await?;
+        }
+        Ok(())
+    })
 }
