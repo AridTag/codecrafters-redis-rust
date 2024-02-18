@@ -1,6 +1,7 @@
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 use std::io::Write;
+use std::str::FromStr;
 use bytes::buf::Writer;
 use bytes::BufMut;
 use futures::future::BoxFuture;
@@ -12,21 +13,27 @@ use crate::database::{db_get, db_list_keys, db_set};
 use crate::persistence::DataType;
 
 #[derive(Debug)]
-pub enum RespDataType {
+pub enum ResponseType {
     //Error(String),
     //SimpleString(String),
     //Integer(i64),
     BulkString(Vec<u8>),
-    Array(Vec<RespDataType>),
+    Array(Vec<ResponseType>),
     //NullArray,
     //NullBulkString,
 }
 
-impl Display for RespDataType {
+impl Display for ResponseType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ResponseType::{:?}", self)
+    }
+}
+
+impl ResponseType {
+    pub fn string(&self) -> Option<String> {
         match self {
-            RespDataType::BulkString(_) => write!(f, "RespDataType::BulkString"),
-            RespDataType::Array(_) => write!(f, "RespDataType::Array"),
+            ResponseType::BulkString(bytes) => Some(String::from_utf8_lossy(bytes).to_string()),
+            _ => None,
         }
     }
 }
@@ -67,9 +74,9 @@ impl RedisClientConnection {
         loop {
             let request = self.read().await?;
             match request {
-                RespDataType::Array(elements) => {
+                ResponseType::Array(elements) => {
                     if !elements.is_empty() {
-                        if let RespDataType::BulkString(command) = &elements[0] {
+                        if let ResponseType::BulkString(command) = &elements[0] {
                             let command = String::from_utf8_lossy(command).to_string();
                             handle_command(self, command, &elements[1..]).await?;
                         }
@@ -81,7 +88,7 @@ impl RedisClientConnection {
         }
     }
 
-    pub async fn read(&mut self) -> Result<RespDataType, anyhow::Error> {
+    pub async fn read(&mut self) -> Result<ResponseType, anyhow::Error> {
         fn slide_window(buffer: &mut [u8; 512], start: usize, length: usize) {
             let (from, to) = buffer.split_at_mut(start);
             to[..length].copy_from_slice(&from[..length]);
@@ -166,7 +173,7 @@ impl RedisClientConnection {
         let length = length as usize;
         Ok(Some(
             RespParseResult {
-                request: RespDataType::BulkString(remainder[..length].to_vec()),
+                request: ResponseType::BulkString(remainder[..length].to_vec()),
                 consumed: length,
             }
         ))
@@ -200,14 +207,14 @@ impl RedisClientConnection {
         Ok(Some(
             RespParseResult {
                 consumed,
-                request: RespDataType::Array(elements),
+                request: ResponseType::Array(elements),
             }
         ))
     }
 }
 
 struct RespParseResult {
-    request: RespDataType,
+    request: ResponseType,
     consumed: usize,
 }
 
@@ -237,28 +244,61 @@ fn write_bulk_string(buffer: &mut Writer<Vec<u8>>, string: &[u8]) -> tokio::io::
     Ok(())
 }
 
-async fn handle_command(client: &mut RedisClientConnection, command: String, arguments: &[RespDataType]) -> Result<(), anyhow::Error> {
+enum Command {
+    Echo,
+    Ping,
+    #[allow(clippy::enum_variant_names)]
+    Command,
+    Select,
+    Set,
+    Get,
+    Config,
+    Keys,
+    Info
+}
+
+impl FromStr for Command {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let res = match s.to_lowercase().as_str() {
+            "echo" => Command::Echo,
+            "ping" => Command::Ping,
+            "command" => Command::Command,
+            "select" => Command::Select,
+            "set" => Command::Set,
+            "get" => Command::Get,
+            "config" => Command::Config,
+            "keys" => Command::Keys,
+            "info" => Command::Info,
+            _ => anyhow::bail!("Invalid Command {}", s)
+        };
+
+        Ok(res)
+    }
+}
+
+async fn handle_command(client: &mut RedisClientConnection, command: String, arguments: &[ResponseType]) -> Result<(), anyhow::Error> {
     let mut response_buff = Vec::with_capacity(256).writer();
-    match command.as_str() {
-        "ECHO" | "echo" => {
-            if let RespDataType::BulkString(string) = &arguments[0] {
-                write_bulk_string(&mut response_buff, string)?;
+    match Command::from_str(command.as_str())? {
+        Command::Echo => {
+            if let Some(string) = arguments[0].string() {
+                write_bulk_string(&mut response_buff, string.as_bytes())?;
             }
         }
 
-        "PING" | "ping" => {
+        Command::Ping => {
             write_simple_string(&mut response_buff, b"PONG")?;
         }
 
-        "COMMAND" | "command" => {
+        Command::Command => {
             // TODO: Need to implement this I guess
             write_simple_error(&mut response_buff, b"COMMAND not implemented")?;
         }
 
-        "SELECT" | "select" => {
+        Command::Select => {
             if !arguments.is_empty() {
-                if let RespDataType::BulkString(id_string) = &arguments[0] {
-                    let id_string = String::from_utf8_lossy(id_string).to_string();
+                if let Some(id_string) = arguments[0].string() {
                     let id = id_string.parse::<usize>()?;
                     client.selected_db = id;
                     write_ok(&mut response_buff)?;
@@ -267,15 +307,13 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
             }
         }
 
-        "SET" | "set" => {
+        Command::Set => {
             let mut success = false;
             if arguments.len() >= 2 {
                 let mut timeout = None;
                 if arguments.len() >= 4 {
-                    if let RespDataType::BulkString(option) = &arguments[2] {
-                        if let RespDataType::BulkString(value) = &arguments[3] {
-                            let option = String::from_utf8_lossy(option).to_string();
-                            let value = String::from_utf8_lossy(value).to_string();
+                    if let Some(option) = arguments[2].string() {
+                        if let Some(value) = arguments[3].string() {
                             match option.as_str() {
                                 "PX" | "px" => {
                                     timeout = Some(Duration::from_millis(value.parse::<u64>()?));
@@ -291,10 +329,8 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
                     }
                 }
 
-                if let RespDataType::BulkString(key) = &arguments[0] {
-                    if let RespDataType::BulkString(value) = &arguments[1] {
-                        let key = String::from_utf8_lossy(key).to_string();
-                        let value = String::from_utf8_lossy(value).to_string();
+                if let Some(key) = arguments[0].string() {
+                    if let Some(value) = arguments[1].string() {
                         db_set(client.selected_db, key, value, timeout).await?;
                         write_ok(&mut response_buff)?;
                         success = true;
@@ -307,11 +343,10 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
             }
         }
 
-        "GET" | "get" => {
+        Command::Get => {
             let mut success = false;
             if !arguments.is_empty() {
-                if let RespDataType::BulkString(key) = &arguments[0] {
-                    let key = String::from_utf8_lossy(key).to_string();
+                if let Some(key) = arguments[0].string() {
                     if let Ok(Some(DataType::String(value))) = db_get(client.selected_db, &key).await {
                         write_bulk_string(&mut response_buff, value.as_bytes())?;
                         success = true;
@@ -324,16 +359,14 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
             }
         }
 
-        "CONFIG" | "config" => {
+        Command::Config => {
             if !arguments.is_empty() {
-                if let RespDataType::BulkString(command) = &arguments[0] {
-                    let command = String::from_utf8_lossy(command).to_string();
+                if let Some(command) = arguments[0].string() {
                     match command.as_str() {
                         "GET" | "get" => {
                             let mut responses: Vec<(&str, Option<String>)> = vec![];
                             for data_arg in &arguments[1..] {
-                                if let RespDataType::BulkString(option) = data_arg {
-                                    let option = String::from_utf8_lossy(option).to_string();
+                                if let Some(option) = data_arg.string() {
                                     match option.as_str() {
                                         "DIR" | "dir" => {
                                             let value = CONFIG.read().await.dir.clone();
@@ -379,23 +412,34 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
             }
         }
 
-        "KEYS" | "keys" => {
+        Command::Keys => {
             if !arguments.is_empty() {
-                if let RespDataType::BulkString(arg) = &arguments[0] {
-                    if arg.len() == 1 && arg[0] == b'*' {
+                if let Some(arg) = arguments[0].string() {
+                    if arg == "*" {
                         let keys = db_list_keys(client.selected_db).await?;
                         let mut resp_keys = Vec::new();
                         for key in keys.iter() {
-                            resp_keys.push(RespDataType::BulkString(key.as_bytes().to_vec()))
+                            resp_keys.push(ResponseType::BulkString(key.as_bytes().to_vec()))
                         }
-                        let resp = RespDataType::Array(resp_keys);
+                        let resp = ResponseType::Array(resp_keys);
                         write_resp(&mut response_buff, &resp).await?;
                     }
                 }
             }
         }
 
-        _ => todo!("Gotta implement")
+        Command::Info => {
+            if !arguments.is_empty() {
+                if let Some(category) = arguments[0].string() {
+                    if category.to_lowercase() == "replication" {
+                        let mut replication_info = String::new();
+                        replication_info.push_str("# Replication\n");
+                        replication_info.push_str("role:master\n");
+                        write_bulk_string(&mut response_buff, replication_info.as_bytes())?;
+                    }
+                }
+            }
+        }
     }
 
     client.stream.write_all(response_buff.get_ref()).await?;
@@ -404,15 +448,15 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
     Ok(())
 }
 
-fn write_resp<'a>(buffer: &'a mut Writer<Vec<u8>>, value: &'a RespDataType)
+fn write_resp<'a>(buffer: &'a mut Writer<Vec<u8>>, value: &'a ResponseType)
     -> BoxFuture<'a, Result<(), anyhow::Error>> {
     Box::pin(async move {
         match value {
-            RespDataType::Array(elements) => {
+            ResponseType::Array(elements) => {
                 write_array(buffer, elements).await?;
             }
 
-            RespDataType::BulkString(s) => {
+            ResponseType::BulkString(s) => {
                 write_bulk_string(buffer, s)?;
             }
 
@@ -423,7 +467,7 @@ fn write_resp<'a>(buffer: &'a mut Writer<Vec<u8>>, value: &'a RespDataType)
     })
 }
 
-fn write_array<'a>(buffer: &'a mut Writer<Vec<u8>>, elements: &'a [RespDataType])
+fn write_array<'a>(buffer: &'a mut Writer<Vec<u8>>, elements: &'a [ResponseType])
     -> BoxFuture<'a, Result<(), anyhow::Error>> {
     Box::pin(async move {
         buffer.write_all(format!("*{}\r\n", elements.len()).as_bytes())?;
