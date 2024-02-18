@@ -438,7 +438,10 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
                             replication_info.push_str("role:slave\n");
                         } else {
                             replication_info.push_str("role:master\n");
+                            replication_info.push_str("master_replid:8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb\n");
+                            replication_info.push_str("master_repl_offset:0\n");
                         }
+
                         write_bulk_string(&mut response_buff, replication_info.as_bytes())?;
                     }
                 }
