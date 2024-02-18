@@ -434,7 +434,11 @@ async fn handle_command(client: &mut RedisClientConnection, command: String, arg
                     if category.to_lowercase() == "replication" {
                         let mut replication_info = String::new();
                         replication_info.push_str("# Replication\n");
-                        replication_info.push_str("role:master\n");
+                        if let Some(_replica_of) = CONFIG.read().await.replica_of.as_ref() {
+                            replication_info.push_str("role:slave\n");
+                        } else {
+                            replication_info.push_str("role:master\n");
+                        }
                         write_bulk_string(&mut response_buff, replication_info.as_bytes())?;
                     }
                 }

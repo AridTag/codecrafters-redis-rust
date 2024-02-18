@@ -4,6 +4,7 @@ mod persistence;
 mod util;
 
 use std::path::Path;
+use std::str::FromStr;
 use tokio::net::TcpListener;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -19,6 +20,13 @@ struct Config {
     dir: Option<String>,
     db_filename: Option<String>,
     port: u16,
+    replica_of: Option<ReplicaOf>
+}
+
+#[allow(unused)]
+struct ReplicaOf {
+    host: String,
+    port: u16,
 }
 
 impl Config {
@@ -27,6 +35,7 @@ impl Config {
             dir: None,
             db_filename: None,
             port: 6379,
+            replica_of: None,
         }
     }
 }
@@ -41,6 +50,10 @@ struct Args {
 
     #[arg(long)]
     port: Option<u16>,
+
+    #[clap(number_of_values = 2, name = "replicaof")]
+    #[arg(long)]
+    replica_of: Option<Vec<String>>,
 }
 
 #[tokio::main]
@@ -54,6 +67,7 @@ async fn main() -> Result<(), anyhow::Error> {
 }
 
 async fn handle_arguments() -> Result<(), anyhow::Error> {
+
     let args = Args::parse();
 
     let mut config = CONFIG.write().await;
@@ -67,6 +81,13 @@ async fn handle_arguments() -> Result<(), anyhow::Error> {
 
     if let Some(port) = args.port {
         config.port = port;
+    }
+
+    if let Some(replica) = args.replica_of {
+        config.replica_of = Some(ReplicaOf {
+            host: replica[0].clone(),
+            port: u16::from_str(replica[1].as_str())?,
+        });
     }
 
     Ok(())
